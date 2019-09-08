@@ -1,0 +1,1 @@
+Very naive websocket implementation prototype, written somewhere around 2011 with only some minor updates later.

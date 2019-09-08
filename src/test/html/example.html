@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="utf-8"/>
+		<title>TEST WS</title>
+		<style>
+			body {
+				margin: 0px;
+				padding: 0px;
+				overflow: hidden;
+				user-select: none;
+				color: #FFF;
+				background-color: #222;
+				width: 100%;
+			}
+		</style>
+	</head>
+	<body>
+	</body>
+</html>
+<script>
+var ws = new WebSocket("ws://uzyszkodnik@127.0.0.1:8080/test?q=hello", ['demo', 'something']);
+ws.binaryType = "arraybuffer";
+        
+ws.onopen = function() {
+	ws.send("hello");
+	ws.send("long string message");
+	
+    var data = new DataView(new ArrayBuffer(4));
+    data.setInt32(0, 0xAABBCCDD);
+    ws.send(data.buffer);
+    ws.send(data.buffer);
+    ws.send(data.buffer);
+    ws.send(data.buffer);
+
+	
+    //data.setInt32(0, 0x11223344);
+    //ws.send(data.buffer);
+};
+
+ws.onmessage = function(evt) {
+    var data = evt.data;
+    
+    if(typeof data === "string") {
+        console.log(data)
+    }
+    else { // array buffer lol
+        var bytearray = new Uint8Array(data);
+
+        console.log("len: " + bytearray.length)
+        var str = "";
+        for(var i=0; i<bytearray.length; i++) {
+            str += bytearray[i].toString(16) + " ";
+        }
+        console.log(str)
+    }
+};
+
+ws.onclose = function(ev) {
+    document.body.innerHTML = "Connection closed: " + ev.code + " " + ev.reason;
+    console.log("Connection closed: " + ev.code + " " + ev.reason);
+};
+
+ws.onerror = function(ev) {
+    console.log("There was an error.");
+};
+
+function sendMovement() {
+    var data = new Int32Array(20);
+    var dataf = new Float32Array(data.buffer);
+
+    data[0] = 0;
+    dataf[1] = 25.324;
+    dataf[2] = 43254;
+    data[3] = 65536;
+
+    ws.send(data.buffer);
+}
+
+</script>

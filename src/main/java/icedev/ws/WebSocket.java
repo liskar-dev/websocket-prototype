@@ -1,22 +1,27 @@
-package websocket;
+package icedev.ws;
 
 import java.io.*;
 import java.net.*;
-import java.nio.charset.Charset;
+import java.nio.*;
+import java.nio.charset.*;
 import java.security.*;
+import java.util.Base64;
 import java.util.Map;
 import java.util.zip.DataFormatException;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
 
-import javax.xml.bind.DatatypeConverter;
-
-import websocket.util.LineReader;
+import icedev.ws.util.*;
 
 
 public final class WebSocket {
+	public static boolean allowContextTakeover = true;
+	public static boolean allowPermessageDeflate = true;
+	public static int readBufferSize = 1024*1024 + 4;
+	public static boolean PRINT_HEADERS;
 	
-	private static final Charset UTF8 = Charset.forName("UTF8");
+	private static final Charset utf8 = Charset.forName("UTF8");
+	private final CharsetEncoder utf8encoder = utf8.newEncoder();
 	
 	public final Map<String, String> headers = new CaseInsensitiveMap();
 	
@@ -25,7 +30,8 @@ public final class WebSocket {
 			// sha1
 			byte[] digest = MessageDigest.getInstance("SHA-1").digest(str.getBytes("UTF8"));
 			// and base64
-			return DatatypeConverter.printBase64Binary(digest);
+			String base64 = Base64.getEncoder().encodeToString(digest);
+			return base64;
 		} catch (NoSuchAlgorithmException e) {
 			throw new IOException(e);
 		}
@@ -54,14 +60,20 @@ public final class WebSocket {
 	private final NetInputStream in;
 	private final OutputStream out;
 	
+	private final BufferProvider reading = new BufferProvider();
+	private final BufferProvider writing = new BufferProvider();
+	private final BufferProvider decompressing = new BufferProvider();
+	private final BufferProvider compressing = new BufferProvider();
 	
-	private byte[] readBuffer = new byte[1024*1024 + 4];
-	private byte[] decompBuffer = new byte[1024*1024*4];
-	private byte[] compBuffer = new byte[1024*1024*4];
+	private boolean deflateEnabled = false;
+	private boolean noContextTakeover = false;
+	Inflater inflater;
+	Deflater deflater;
 	
-	public boolean deflateEnabled = false;
-	Inflater inflater = new Inflater(true);
-	Deflater deflater = new Deflater(9, true);
+	
+	public void enableDeflate() {
+		deflateEnabled = true;
+	}
 
 	public WebSocket(Socket socket) throws IOException {
 		sock = socket;
@@ -70,7 +82,6 @@ public final class WebSocket {
 		in = new NetInputStream(bin);
 		
 		out = new BufferedOutputStream(sock.getOutputStream());
-		
 		
 		sock.setSoTimeout(1000);
 	}
@@ -118,14 +129,27 @@ public final class WebSocket {
 			path = line.split(" ")[1];
 	
 			// we read header fields
-			String key = null;
+			String websocketKey = null;
 	
 			// read line by line until we get empty line
 			while (!(line = lr.readLine()).isEmpty()) {
-				
+				if(PRINT_HEADERS)
+					System.out.println("\t" + line);
 				if(line.contains(": ")) {
 					String[] idx = line.split("\\: ",2);
+					String key = idx[0].toLowerCase();
+					String value = idx[1];
 					headers.put(idx[0].toLowerCase(), idx[1]);
+					
+					if(key.equals("sec-websocket-extensions")) {
+						if(value.contains("permessage-deflate") && allowPermessageDeflate) {
+							System.out.println("Enabling permessage deflate");
+							enableDeflate();
+							if(value.contains("no_context_takeover") || !allowContextTakeover)
+								noContextTakeover = true;
+						}
+					}
+					
 				}
 			}
 //			while (!(line = br.readLine()).isEmpty()) {
@@ -133,11 +157,11 @@ public final class WebSocket {
 //			}
 			
 			if(headers.containsKey("sec-websocket-key")) {
-				key = headers.get("sec-websocket-key");
-				wsKey = key;
+				websocketKey = headers.get("sec-websocket-key");
+				wsKey = websocketKey;
 			}
 			else if(headers.containsKey("sec-websocket-key1")) {
-				System.out.println("Using old websocket");
+//				System.out.println("Using old websocket");
 				//System.out.println("New websocket");
 				String key1 = headers.get("sec-websocket-key1");
 				String key2 = headers.get("sec-websocket-key2");
@@ -179,38 +203,15 @@ public final class WebSocket {
 				throw new IOException("No Websocket key specified");
 			}
 			
-			String extensions = headers.get("sec-websocket-extensions");
-			if(extensions != null && extensions.contains("permessage-deflate")) {
-				// TODO compression is broken
-				//deflateEnabled = true;
-			}
+
 			
 		} catch(IOException | RuntimeException e) {
 			close();
 			throw e;
 		}
 	}
-	static final char[] hex = {'0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F'};
-	private String hex(int val) {
-		return hex[val/16] + "" + hex[val%16];
-	}
-	private String hex(byte[] bytes) {
-		String hax = "";
-		boolean first = true;
-		for(byte b : bytes) {
-			if(first)
-				first=false;
-			else
-				hax += ":";
-			int val = b & 0xFF;
-			hax += hex[val/16];
-			hax += hex[val%16];
-		}
-		return hax;
-	}
 
-
-	public void accept() throws IOException {
+	public void accept(String protocol) throws IOException {
 		try {
 			sock.setSoTimeout(0);
 			synchronized(out) {
@@ -238,8 +239,17 @@ public final class WebSocket {
 					
 				}
 				
-				if(deflateEnabled)
-					pw.println("Sec-WebSocket-Extensions: permessage-deflate");
+				if(protocol != null) {
+					pw.println("Sec-WebSocket-Protocol: " + protocol);
+				}
+				
+				if(deflateEnabled) {
+					if(noContextTakeover) {
+						pw.println("Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover");
+					} else {
+						pw.println("Sec-WebSocket-Extensions: permessage-deflate");
+					}
+				}
 				pw.println();
 				pw.flush();
 				
@@ -247,9 +257,15 @@ public final class WebSocket {
 					out.write(digest(oldKey));
 					out.flush();
 				}
+				
+				if(deflateEnabled) {
+					inflater = new Inflater(true);
+					deflater = new Deflater(9, true);
+				}
 
 				accepted = true;
 			}
+
 		} catch(IOException | RuntimeException e) {
 			close();
 			throw e;
@@ -294,7 +310,7 @@ public final class WebSocket {
 		}
 	}
 	
-	byte[] buffer = new byte[1024*4]; // for old
+//	byte[] buffer = new byte[1024*4]; // for old
 	
 	/**
 	 * Tries to read frame from socket and return corresponding object
@@ -313,16 +329,18 @@ public final class WebSocket {
 				sock.setSoTimeout(1000); // we dont want to get stuck reading packet
 
 				if(opcode == 0xFF) {
-					return new ControlFrame(ControlFrame.OPCODE_CLOSE, null);
+					return new ControlFrame(ControlFrame.OPCODE_CLOSE, null, 0, 0);
 				}
 				if(opcode != 0x00)
-					throw new IOException("Expected 0x00, got 0x" + hex(opcode));
+					throw new IOException("Expected 0x00, got 0x" + Hex.hexByte(opcode));
 				
 				int i = 0;
+				
+				byte[] buffer = reading.get(1024);
 				while(true) {
 					int read = in.read();
 					if(read==0xFF) {
-						return new String(buffer, 0, i, UTF8);
+						return new String(buffer, 0, i, utf8);
 					} else {
 						buffer[i++] = (byte) read;
 					}
@@ -335,8 +353,10 @@ public final class WebSocket {
 				sock.setSoTimeout(1000); // we dont want to get stuck reading packet
 				boolean whole = (opcode & 0b10000000) != 0;
 				boolean rsv1 = (opcode & 0b01000000) != 0;
+				boolean rsv2 = (opcode & 0b00100000) != 0;
 				
-				System.out.println("RSV1: " + rsv1);
+//				System.out.println("RSV1: " + rsv1);
+//				System.out.println("RSV2: " + rsv2);
 				
 				if(!whole) {
 					close(1003, "Fragmented messages not supported");
@@ -346,6 +366,7 @@ public final class WebSocket {
 				opcode = opcode & 0xF;
 		
 				int len = in.read();
+				
 				boolean encoded = (len >= 128);
 		
 				if (encoded)
@@ -356,96 +377,111 @@ public final class WebSocket {
 				} else if (len == 126) {
 					len = (in.read() << 8) | in.read();
 				}
+//				System.out.println("incoming message length = " + len);
 				
+
 				//System.out.println("Length got: " + len);
 				
 				if(len>1024*1024*4) {
 					close(1008, "Message too long");
 					throw new IOException("Message too long: " + len);
 				}
-		
+				
+				byte[] buffer;
 				byte[] key = new byte[4];
 		
 				if (encoded) {
 					readFully(key, key.length);
 				}
 
-				byte[] frame;// = new byte[len];
-				
-				
+//				byte[] frame;// = new byte[len];
 				
 				if(rsv1) {
-					System.out.println("decompressing! ?? " + encoded);
+//					System.out.println("decompressing! encoded: " + encoded);
 					
 					//System.out.println("hex data: " + hex(frame));
-
-					readFully(readBuffer, len);
 					
+					byte[] decompBuffer = decompressing.get(len+4);
+					readFully(decompBuffer, len);
 					
 					if (encoded) {
 						for (int i = 0; i < len; i++) {
-							readBuffer[i] = (byte) (readBuffer[i] ^ key[i % 4]);
+							decompBuffer[i] = (byte) (decompBuffer[i] ^ key[i % 4]);
 						}
 					}
+					
+//					System.out.println("Bytes to decompress: " + len);
+//					Hex.printBytes(decompBuffer, 0, len);
+					
+					buffer = reading.get(Math.min(len*2, BufferProvider.maximumCapacity));
+					
+//					if(len ==5)
+//						return "";
 					
 //					data[frame.length+0] = (byte) 0x00;
 //					data[frame.length+1] = (byte) 0x00;
 //					data[frame.length+2] = (byte) 0xFF;
 //					data[frame.length+3] = (byte) 0xFF;
 					
+					decompBuffer[len+0] = (byte) 0x00;
+					decompBuffer[len+1] = (byte) 0x00;
+					decompBuffer[len+2] = (byte) 0xff;
+					decompBuffer[len+3] = (byte) 0xff;
 					
-					inflater.setInput(readBuffer, 0, len);
+					inflater.setInput(decompBuffer, 0, len+4);
 					
-					
-					System.out.println("remaining: " + inflater.getRemaining());
-					System.out.println("wtf: " + inflater.getAdler());
-					
-					
-					int bytes = inflater.inflate(decompBuffer);
-					inflater.reset();
-					
-					System.out.println("Bytes deflated: " + bytes);
+//					System.out.println("Remaining: " + inflater.getRemaining());
+//					System.out.println("Adler: " + inflater.getAdler());
 					
 					
-					frame = new byte[bytes];
-					System.arraycopy(decompBuffer, 0, frame, 0, bytes);
-					
-					
-				} else {
-					frame = new byte[len];
-					readFully(frame, len);
+					int numInflatedBytes = 0;
+					try {
+						numInflatedBytes = inflater.inflate(buffer);
+					} catch (DataFormatException e) {
+						e.printStackTrace();
+						throw e;
+					}
 					
 
+					if(noContextTakeover) {
+						inflater.reset();
+					}
+					
+//					System.out.println("Bytes deflated: " + numInflatedBytes);
+					
+//					frame = new byte[bytes];
+					len = numInflatedBytes;
+				} else {
+//					frame = new byte[len];
+					buffer = reading.get(len);
+					readFully(buffer, len);
+
 					if (encoded) {
-						for (int i = 0; i < frame.length; i++) {
-							frame[i] = (byte) (frame[i] ^ key[i % 4]);
+						for (int i = 0; i < len; i++) {
+							buffer[i] = (byte) (buffer[i] ^ key[i % 4]);
 						}
 					}
 				}
 		
-		
-				
-				
-				
 				switch(opcode) {
 				case 0x01: // utf8 message
-					return new String(frame, "UTF8");
+					return new String(buffer, 0, len, "UTF8");
 				case 0x02: // binary message
-					return frame;
+					return ByteBuffer.wrap(buffer, 0, len);
 				case 0x08: // close
 					close(1000, null); // will send closing frame also
-					return new ControlFrame(opcode, frame);
+					return new ControlFrame(opcode, buffer, 0, len);
 				case 0x09: //ping
 					pong();
-					return new ControlFrame(opcode, frame);
+					return new ControlFrame(opcode, buffer, 0, len);
 				case 0x0A: //pong
-					return new ControlFrame(opcode, frame);
+					return new ControlFrame(opcode, buffer, 0, len);
 				}
 				
-				throw new IOException("Unknown opcode " + Integer.toHexString(opcode) + " / " + new String(frame, "UTF8"));
+				throw new IOException("Unknown opcode 0x" + Integer.toHexString(opcode) + " / " + new String(buffer, 0, len, "UTF8"));
 			}
 		} catch(SocketException| DataFormatException | EOFException e) {
-			System.out.println(e);
+			System.out.println("Error reading io: " + e);
 			close();
 			return null;
 		} catch (IOException | RuntimeException e) {
@@ -463,12 +499,20 @@ public final class WebSocket {
 	}
 	
 
-	public final void write(String data) throws IOException {
-		if(data==null) {
+	public final void write(String message) throws IOException {
+		if(message==null) {
 			out.write(old? 0xFF : 0); // length 0
 			return;
 		}
-		write(data.getBytes("UTF8"));
+
+		var buffer = writing.getSafe(message.length() * 3);
+		
+		CharBuffer wrapChars = CharBuffer.wrap(message);
+		ByteBuffer wrapBytes = ByteBuffer.wrap(buffer);
+		
+		utf8encoder.encode(wrapChars, wrapBytes, true);
+		
+		write(buffer, wrapBytes.position());
 	}
 
 	private final void write(byte[] data) throws IOException {
@@ -498,18 +542,28 @@ public final class WebSocket {
 	}
 	
 	public final void send(byte[] data) throws IOException {
+		send(data, 0, data.length);
+	}
+	
+	public final void send(byte[] data, int offset, int length) throws IOException {
 		synchronized(out) {
+
+			if(sock.isClosed())
+				return;
 			
 			if(deflateEnabled) {
 				out.write(0x02 | 0b10000000 | 0b01000000); // opcode 0x02, WHOLE, RSV1
 
-				deflater.setInput(data);
-				deflater.finish();
-				int len = deflater.deflate(compBuffer);
-				write(compBuffer, len);
-				deflater.reset();
+				deflater.setInput(data, offset, length);
+				var compBuffer = compressing.get(length);
+				int len = deflater.deflate(compBuffer, 0, compBuffer.length, Deflater.SYNC_FLUSH);
+//				System.out.println("Writing compressed data: " + len);
+				write(compBuffer, len-4);
+				
+				if(noContextTakeover) {
+					deflater.reset();
+				}
 			} else {
-
 				out.write(0x02 | 0b10000000); // opcode 0x02, WHOLE bit
 				write(data);
 			}
@@ -527,19 +581,38 @@ public final class WebSocket {
 				return;
 			if(old) {
 				out.write(0x00);
-				out.write(message.getBytes(UTF8));
+				var buffer = writing.getSafe(message.length() * 3);
+				
+				CharBuffer wrapChars = CharBuffer.wrap(message);
+				ByteBuffer wrapBytes = ByteBuffer.wrap(buffer);
+				
+				utf8encoder.encode(wrapChars, wrapBytes, true);
+				
+				out.write(buffer, 0, wrapBytes.position());
 				out.write(0xFF);
 			} else {
-
 				if(deflateEnabled) {
 					out.write(opcode | 0b10000000 | 0b01000000); // opcode 0x02, WHOLE, RSV1
-					byte[] data = message.getBytes("UTF8");
-					deflater.setInput(data);
-					deflater.finish();
-					int len = deflater.deflate(compBuffer);
-					System.out.println("Writing compressed data: " + len);
-					write(compBuffer, len);
-					deflater.reset();
+
+					var buffer = writing.getSafe(message.length() * 3);
+					
+					CharBuffer wrapChars = CharBuffer.wrap(message);
+					ByteBuffer wrapBytes = ByteBuffer.wrap(buffer);
+					
+					utf8encoder.encode(wrapChars, wrapBytes, true);
+					
+					deflater.setInput(buffer, 0, wrapBytes.position());
+//					boolean needs = deflater.needsInput();
+					
+					var compBuffer = compressing.get(buffer.length);
+					int len = deflater.deflate(compBuffer, 0 , compBuffer.length, Deflater.FULL_FLUSH);
+//					System.out.println("Needs input: " + needs);
+//					System.out.println("Writing compressed data: " + (len-4));
+					write(compBuffer, len-4);
+					
+					if(noContextTakeover) {
+						deflater.reset();
+					}
 				} else {
 					out.write(opcode | 0b10000000); // opcode and WHOLE bit
 					write(message);
@@ -577,7 +650,8 @@ public final class WebSocket {
 			else
 				reject(message);
 		} catch (IOException e) {
-			System.err.println("Error closing: " + e);
+			e.printStackTrace();
+//			System.err.println("Error closing: " + e);
 		} finally {
 			close();
 		}

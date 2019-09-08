@@ -1,4 +1,4 @@
-package websocket;
+package icedev.ws;
 
 import java.io.*;
 

@@ -1,7 +1,9 @@
-package websocket;
+package icedev.ws.api;
 
 import java.io.*;
 import java.net.*;
+
+import icedev.ws.WebSocket;
   
 public class WebSocketServer {
 	
@@ -38,9 +40,5 @@ public class WebSocketServer {
 
 	public int getPort() {
 	    return server.getLocalPort();
-    }
-	
-	public SocketAddress getLocalAddress() {
-		return server.getLocalSocketAddress();
-	}
+    }  
 }  

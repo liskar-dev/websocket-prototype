@@ -1,4 +1,4 @@
-package websocket.util;
+package icedev.ws.util;
 
 import java.io.*;
 import java.nio.charset.Charset;

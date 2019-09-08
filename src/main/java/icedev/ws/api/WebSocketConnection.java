@@ -1,11 +1,14 @@
-package websocket;
+package icedev.ws.api;
 
-import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.LinkedList;
 import java.util.Queue;
 
+import icedev.ws.WebSocket;
+
 public abstract class WebSocketConnection {
-	
+	public static final long THREAD_STACK_IN = 1024;
+	public static final long THREAD_STACK_OUT = 1024;
 	
 	Thread receiveThread;
 	Thread sendThread;
@@ -20,20 +23,19 @@ public abstract class WebSocketConnection {
 	
 	protected Throwable cause;
 	
-	
 	private synchronized void setCause(Throwable c) {
 		if(cause == null)
 			cause = c;
 	}
 	
 	public void start() {
-		receiveThread = new Thread("Receive Thread " + sock.getIP()) {
+		receiveThread = new Thread(null, null, "Receive Thread " + sock.getIP(), THREAD_STACK_IN) {
 			@Override
 			public void run() {
 				runReceiving();
 			}
 		};
-		sendThread = new Thread("Send Thread " + sock.getIP()) {
+		sendThread = new Thread(null, null, "Send Thread " + sock.getIP(), THREAD_STACK_OUT) {
 			@Override
 			public void run() {
 				runSending();
@@ -64,10 +66,9 @@ public abstract class WebSocketConnection {
 	protected abstract void onReceived(Object message);
 	protected abstract void onDisconnected();
 
-
-	Queue<String> sendQueue = new LinkedList<>();
+	Queue<Object> sendQueue = new LinkedList<>();
 	
-	public void send(String message) {
+	public void send(Object message) {
 		synchronized(sendQueue) {
 			if(sendQueue.size() > maxQueueSize) {
 				close();
@@ -82,13 +83,29 @@ public abstract class WebSocketConnection {
 	protected void runSending() {
 		try {
 			while(!sock.isClosed()) {
-				String message;
+				Object message;
+				
 				synchronized(sendQueue) {
 					while(sendQueue.isEmpty())
 							sendQueue.wait();
 					message = sendQueue.poll();
 				}
-				sock.send(message);
+				
+				if(message instanceof String)
+					sock.send((String)message);
+				if(message instanceof ByteBuffer) {
+					ByteBuffer buf = (ByteBuffer) message;
+					if(buf.isDirect())
+						throw new RuntimeException("no direct byte buffers please");
+					byte[] data = buf.array();
+					int offset = buf.arrayOffset();
+					int length = buf.remaining();
+					sock.send(data, offset, length);
+				}
+				if(message instanceof byte[]) {
+					byte[] data = (byte[]) message;
+					sock.send(data, 0, data.length);
+				}
 			}
 		} catch (InterruptedException e) {
 			//System.out.println("Sending thread interrupted " + sock.getIP());

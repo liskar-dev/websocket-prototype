@@ -1,4 +1,4 @@
-package websocket;
+package icedev.ws;
 
 import java.util.HashMap;
 
@@ -10,11 +10,14 @@ public class CaseInsensitiveMap extends HashMap<String, String> {
        return super.put(key.toLowerCase(), value);
     }
 
-    // not @Override because that would require the key parameter to be of type Object
+    @Override
+    public String get(Object key) {
+       return super.get(((String)key).toLowerCase());
+    }
+    
     public String get(String key) {
        return super.get(key.toLowerCase());
     }
-    
     
     @Override
     public boolean containsKey(Object key) {
