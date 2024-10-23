@@ -1,1 +1,1 @@
-Very naive websocket implementation prototype, written somewhere around 2011 with only some minor updates later.
+Very naive websocket prototype, written from scratch according to RFC 6455 somewhere around 2012.
